@@ -1,0 +1,13 @@
+name: n5-dask
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.8
+  - tqdm
+  - numpy=1.20
+  - scikit-image=0.18
+  - zarr=2.7
+  - dask=2021.4
+  - dask-image=0.5.0
+
