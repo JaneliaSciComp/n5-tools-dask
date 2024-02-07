@@ -4,10 +4,14 @@ channels:
   - defaults
 dependencies:
   - python=3.8
-  - tqdm
+  - pip
+  - tqdm=4.66.1
   - numpy=1.20
   - scikit-image=0.18
   - zarr=2.7
   - dask=2021.4
   - dask-image=0.5.0
+  - pip:
+    - xarray-multiscale==0.1.7
+    - fibsem-tools==0.2.0
 
