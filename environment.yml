@@ -3,15 +3,18 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.8
+  - python=3.11
   - pip
+  - dask=2023.10.1
+  - dask-image=2023.08.1
+  - distributed=2023.10.1
+  - flatten_json
+  - numpy>=1.26.0
+  - pyyaml
+  - scikit-image>=0.21.0
   - tqdm=4.66.1
-  - numpy=1.20
-  - scikit-image=0.18
-  - zarr=2.7
-  - dask=2021.4
-  - dask-image=0.5.0
+  - zarr=2.16.1
   - pip:
-    - xarray-multiscale==0.1.7
+    - xarray-multiscale==2.0.0
     - fibsem-tools==0.2.0
-
+    - ome-types
