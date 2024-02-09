@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 '''
-Add multiscale imagery to n5 volume
+Add multiscale imagery to N5 volume
 '''
 
 import argparse
