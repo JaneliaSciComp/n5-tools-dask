@@ -14,7 +14,10 @@ conda activate n5-dask
 2. Run any of the scripts
 
 ```
-mkdir output
-python src/n5_dask/n5_to_tif.py -i data/test.n5/ -d mri/c0/s0 -o output
+mkdir output_tiffs
+python src/n5_dask/n5_to_tif.py -i data/test.n5/ -d mri/c0/s0 -o output_tiffs
+python src/n5_dask/tif_to_n5.py -i output_tiffs -o output_n5 -d mri -c 64,64,64 --compression gzip
 ```
+
+This will reprocess the included n5 into a series of TIFFs, which are then reprocessed back into an n5 with smaller chunking.
 
