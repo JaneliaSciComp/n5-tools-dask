@@ -1,4 +1,4 @@
-# n5-dask
+# n5-tools-dask
 
 Dask-based utilities to process N5 images. This repo is a proof of concept and is not meant to be used for production purposes.
 
