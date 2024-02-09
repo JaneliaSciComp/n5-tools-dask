@@ -8,8 +8,10 @@ import math
 import numpy as np
 import dask.array as da
 import zarr
+
+from dask.diagnostics import ProgressBar
+from xarray_multiscale import (multiscale, reducers)
 from zarr.errors import PathNotFoundError
-from xarray_multiscale import multiscale
 
 def add_metadata(n5_path, downsampling_factors=(2,2,2), axes=("x","y","z"), pixel_res=None, pixel_res_units="nm"):
     store = zarr.N5Store(n5_path)
@@ -41,16 +43,17 @@ def add_metadata(n5_path, downsampling_factors=(2,2,2), axes=("x","y","z"), pixe
 
 
 def add_multiscale(n5_path, data_set, downsampling_factors=(2,2,2), \
-        downsampling_method=np.mean, thumbnail_size_yx=None):
+        downsampling_method=reducers.windowed_mean,
+        thumbnail_size_yx=None):
     '''
     Given an n5 with "s0", generate downsampled versions s1, s2, etc., up to the point where
     the smallest version is larger than thumbnail_size_yx (which defaults to the chunk size).
     '''
-    print('Generating multiscale for', n5_path)
+    print('Generating multiscale for', n5_path, data_set)
     store = zarr.N5Store(n5_path)
 
     # Find out what compression is used for s0, so we can use the same for the multiscale
-    fullscale = f'{data_set}/s0'
+    fullscale = f'{data_set}/s0' if data_set != '/' else '/s0'
     r = zarr.open(store=store, mode='r')
     compressor = r[fullscale].compressor
 
@@ -102,16 +105,8 @@ def main():
     parser.add_argument('-u', '--pixel_res_units', dest='pixel_res_units', type=str, default="nm", \
         help='Measurement unit for --pixel_res (default "nm") - required for Neuroglancer')
 
-    parser.add_argument('--distributed', dest='distributed', action='store_true', \
-        help='Run with distributed scheduler (default)')
-    parser.set_defaults(distributed=False)
-
-    parser.add_argument('--workers', dest='workers', type=int, default=20, \
-        help='If --distributed is set, this specifies the number of workers (default 20)')
-
-    parser.add_argument('--dashboard', dest='dashboard', action='store_true', \
-        help='If --distributed is set, this runs a web-based dashboard on port 8787')
-    parser.set_defaults(dashboard=False)
+    parser.add_argument('--dask-scheduler', dest='dask_scheduler', type=str, default=None, \
+        help='Run with distributed scheduler')
 
     parser.add_argument('--metadata-only', dest='metadata_only', action='store_true', \
         help='Only fix metadata on an existing multiscale pyramid')
@@ -119,20 +114,14 @@ def main():
 
     args = parser.parse_args()
 
-    if args.distributed:
-        dashboard_address = None
-        if args.dashboard: 
-            dashboard_address = ":8787"
-            print(f"Starting dashboard on {dashboard_address}")
-
+    if args.dask_scheduler:
         from dask.distributed import Client
-        client = Client(processes=True, n_workers=args.workers, \
-            threads_per_worker=1, dashboard_address=dashboard_address)
-        
+        client = Client(address=args.dask_scheduler)
     else:
-        from dask.diagnostics import ProgressBar
-        pbar = ProgressBar()
-        pbar.register()
+        client = None
+
+    pbar = ProgressBar()
+    pbar.register()
 
     downsampling_factors = [int(c) for c in args.downsampling_factors.split(',')]
 
@@ -144,6 +133,9 @@ def main():
         add_multiscale(args.input_path, args.data_set, downsampling_factors=downsampling_factors)
 
     add_metadata(args.input_path, downsampling_factors=downsampling_factors, pixel_res=pixel_res, pixel_res_units=args.pixel_res_units)
+
+    if client is not None:
+        client.close()
 
 
 if __name__ == "__main__":
