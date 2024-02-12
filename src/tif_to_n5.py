@@ -1,9 +1,14 @@
 #!/usr/bin/env python
+'''
+Convert a TIFF series to an N5 volume
+'''
 
 import argparse
-import zarr
 import numcodecs as codecs
+import zarr
+
 import dask_image.imread
+from dask.diagnostics import ProgressBar
 from dask.delayed import delayed
 
 
@@ -76,16 +81,8 @@ def main():
     parser.add_argument('--compression', dest='compression', type=str, default='bz2', \
         help='Set the compression. Valid values any codec id supported by numcodecs including: raw, lz4, gzip, bz2, blosc. Default is bz2.')
 
-    parser.add_argument('--distributed', dest='distributed', action='store_true', \
-        help='Run with distributed scheduler (default)')
-    parser.set_defaults(distributed=False)
-
-    parser.add_argument('--workers', dest='workers', type=int, default=20, \
-        help='If --distributed is set, this specifies the number of workers (default 20)')
-
-    parser.add_argument('--dashboard', dest='dashboard', action='store_true', \
-        help='Run a web-based dashboard on port 8787')
-    parser.set_defaults(dashboard=False)
+    parser.add_argument('--dask-scheduler', dest='dask_scheduler', type=str, default=None, \
+        help='Run with distributed scheduler')
 
     args = parser.parse_args()
 
@@ -94,23 +91,20 @@ def main():
     else:
         compressor = codecs.get_codec(dict(id=args.compression))
 
-    if args.distributed:
-        dashboard_address = None
-        if args.dashboard: 
-            dashboard_address = ":8787"
-            print(f"Starting dashboard on {dashboard_address}")
-
+    if args.dask_scheduler:
         from dask.distributed import Client
-        client = Client(processes=True, n_workers=args.workers, \
-            threads_per_worker=1, dashboard_address=dashboard_address)
-        
+        client = Client(address=args.dask_scheduler)
     else:
-        from dask.diagnostics import ProgressBar
-        pbar = ProgressBar()
-        pbar.register()
+        client = None
+
+    pbar = ProgressBar()
+    pbar.register()
 
     tif_series_to_n5_volume(args.input_path, args.output_path, args.data_set, compressor, \
         chunk_size=[int(c) for c in args.chunk_size.split(',')], dtype=args.dtype)
+
+    if client is not None:
+        client.close()
 
 
 if __name__ == "__main__":

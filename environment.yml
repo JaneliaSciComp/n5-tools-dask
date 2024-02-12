@@ -1,4 +1,4 @@
-name: n5-dask
+name: n5-tools-dask
 channels:
   - conda-forge
   - defaults
