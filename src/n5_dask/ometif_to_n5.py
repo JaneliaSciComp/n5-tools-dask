@@ -15,8 +15,17 @@ from flatten_json import flatten
 from tifffile import TiffFile
 
 
+def _inttuple(arg):
+    if arg is not None and arg.strip():
+        return tuple([int(d) for d in arg.split(',')])
+    else:
+        return ()
+
+
 def _ometif_to_n5_volume(input_path, output_path, 
                          data_set, compressor,
+                         start_point_param=(), # start point in czyx order
+                         data_shape_param=(), # shape param in czyx order
                          chunk_size=(128,128,128),
                          zscale=1.0):
     """
@@ -28,13 +37,34 @@ def _ometif_to_n5_volume(input_path, output_path,
                   'This method only supports OME TIFF', flush = True)
             return
         tif_series = tif.series[0]
-        data_shape = tif_series.shape
-        data_shape = (64, 2, 64, 128) # !!!!!!!!
-        data_type = tif_series.dtype
+        # index channels from the tif
         dims = [d for d in tif_series.axes.lower()
                                 .replace('i', 'z')
                                 .replace('s', 'c')]
         indexed_dims = {dim:i for i,dim in enumerate(dims)}
+        tif_data_shape = tif_series.shape
+        # fill in limits for unspecified channels
+        data_start_point = czyx_to_actual_order(list((len(tif_data_shape)-
+                                                      len(start_point_param))*
+                                                      (0,)+ # fill with 0
+                                                     start_point_param),
+                                                list(len(tif_data_shape)*(0,)),
+                                                indexed_dims['c'],
+                                                indexed_dims['z'],
+                                                indexed_dims['y'],
+                                                indexed_dims['x'])
+        data_shape_input = czyx_to_actual_order(list((len(tif_data_shape)-
+                                                      len(data_shape_param))*
+                                                      (0,)+ # fill with 0
+                                                     data_shape_param),
+                                                list(len(tif_data_shape)*(0,)),
+                                                indexed_dims['c'],
+                                                indexed_dims['z'],
+                                                indexed_dims['y'],
+                                                indexed_dims['x'])
+        data_shape = tuple(map(lambda t: t[0] if t[0] > 0 else t[1],
+                               zip(data_shape_input, tif_data_shape)))
+        data_type = tif_series.dtype
         ome = ome_types.from_xml(tif.ome_metadata)
         scale = { d:getattr(ome.images[0].pixels, f'physical_size_{d}', None)
                   for d in dims}
@@ -42,17 +72,23 @@ def _ometif_to_n5_volume(input_path, output_path,
             scale['z'] = zscale
 
         n_channels = data_shape[indexed_dims['c']]
+
         volume_shape = (data_shape[indexed_dims['c']],
                         data_shape[indexed_dims['z']],
                         data_shape[indexed_dims['y']],
                         data_shape[indexed_dims['x']])
+        volume_start = np.array(data_start_point)
+        volume_end = volume_start + volume_shape
 
         print(f'Input tiff info - ',
               f'ome: {ome.images[0]},',
               f'dims: {dims} ', 
               f'scale: {scale} ',
+              f'start_point: {data_start_point}',
               f'shape: {data_shape}',
               f'channels: {n_channels}',
+              f'volume_start: {volume_start}',
+              f'volume_end: {volume_end}',
               f'volume_shape: {volume_shape}',
               flush=True)
 
@@ -84,8 +120,8 @@ def _ometif_to_n5_volume(input_path, output_path,
 
     persisted_blocks = []
     for block_index in np.ndindex(*nblocks):
-        block_start = block_size * block_index
-        block_stop = np.minimum(data_shape, block_start + block_size)
+        block_start = volume_start + block_size * block_index
+        block_stop = np.minimum(volume_end, block_start + block_size)
         block_slices = tuple([slice(start, stop)
                               for start, stop in zip(block_start, block_stop)])
         block_shape = tuple([s.stop - s.start for s in block_slices])
@@ -184,8 +220,19 @@ def main():
         default='/s0',
         help='Path to output data set (default is /s0)')
 
-    parser.add_argument('-c', '--chunk_size', dest='chunk_size', type=str,
-        default='128,128,128',
+    parser.add_argument('--start_data_point', dest='start_data_point',
+        type=_inttuple,
+        default=(),
+        help='Comma-delimited list for the start data point')
+
+    parser.add_argument('--data_shape', dest='data_shape',
+        type=_inttuple,
+        default=(),
+        help='Comma-delimited list for the data shape')
+
+    parser.add_argument('-c', '--chunk_size', dest='chunk_size',
+        type=_inttuple,
+        default=(128,128,128),
         help='Comma-delimited list describing the chunk size (x,y,z)')
 
     parser.add_argument('--z-scale', dest='z_scale', type=float,
@@ -226,11 +273,15 @@ def main():
     # the chunk size input arg is given in x,y,z order
     # so after we extract it from the arg we have to revert it
     # and pass it to the function as z,y,x
-    zyx_chunk_size = [int(c) for c in args.chunk_size.split(',')][::-1]
+    zyx_chunk_size = args.chunk_size[::-1]
+    czyx_data_shape = args.data_shape[::-1]
+    czyx_data_start = args.start_data_point[::-1]
     persisted_blocks = _ometif_to_n5_volume(args.input_path,
                                             args.output_path,
                                             args.data_set,
                                             compressor,
+                                            start_point_param=czyx_data_start,
+                                            data_shape=czyx_data_shape,
                                             chunk_size=zyx_chunk_size,
                                             zscale=args.z_scale)
 
