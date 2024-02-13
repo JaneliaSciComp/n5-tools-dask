@@ -1,69 +1,112 @@
 #!/usr/bin/env python
-'''
-Add multiscale imagery to N5 volume
-'''
+"""
+Add multiscale imagery to n5 volume
+"""
 
 import argparse
+import dask
+import dask.array as da
 import math
 import numpy as np
-import dask.array as da
+import yaml
 import zarr
 
-from dask.diagnostics import ProgressBar
+from dask.distributed import (Client, LocalCluster)
+from flatten_json import flatten
+
 from xarray_multiscale import (multiscale, reducers)
-from zarr.errors import PathNotFoundError
-
-def add_metadata(n5_path, downsampling_factors=(2,2,2), axes=("x","y","z"), pixel_res=None, pixel_res_units="nm"):
-    store = zarr.N5Store(n5_path)
-    scales = []
-
-    for idx in range(20):
-        try:
-            zarr.open(store, path=f'/s{idx}', mode='r')
-        except PathNotFoundError:
-            break
-        factors = tuple([int(math.pow(f,idx)) for f in downsampling_factors])
-        print(f"Setting downsampling factors for scale {idx} to {factors}")
-        scales.append(factors)
-        if idx>0:
-            z = zarr.open(store, path=f'/s{idx}', mode='a')
-            z.attrs["downsamplingFactors"] = factors
-
-    # Add metadata at the root
-    z = zarr.open(store, path='/', mode='a')
-    z.attrs["scales"] = scales
-    if axes:
-        z.attrs["axes"] = axes
-    if pixel_res:
-        z.attrs["pixelResolution"] = {
-            "dimensions": pixel_res,
-            "unit": pixel_res_units
-        }
-    print("Added multiscale metadata to", n5_path)
 
 
-def add_multiscale(n5_path, data_set, downsampling_factors=(2,2,2), \
-        downsampling_method=reducers.windowed_mean,
-        thumbnail_size_yx=None):
-    '''
+def _stringlist(arg):
+    if arg is not None and arg.strip():
+        return [s.strip() for s in arg.split(',')]
+    else:
+        return []
+
+
+def _open_data_container(data_path, mode):
+    try:
+        data_container = zarr.open(store=zarr.N5Store(data_path),
+                                   mode=mode)
+        return data_container
+    except Exception as e:
+        print(f'Error opening data group {data_path}', e, flush=True)
+        raise e
+
+
+def _get_pixel_resolution(attrs, default_pix_res=None, default_pix_res_units='um'):
+    pixel_res_attr = attrs.get('pixelResolution')
+    pixel_res_units_val = None
+    if isinstance(pixel_res_attr, dict):
+        pixel_res_values = pixel_res_attr.get('dimensions')
+        pixel_res_units_val = pixel_res_attr.get('dimensions')
+    elif isinstance(pixel_res_attr, list):
+        pixel_res_values = pixel_res_attr
+
+    if not pixel_res_values:
+        pixel_res = tuple(np.array(default_pix_res)) if default_pix_res else None
+    elif (attrs.get('downsamplingFactors')):
+        pixel_res = tuple((np.array(pixel_res_values) *
+                          np.array(attrs['downsamplingFactors'])))
+    else:
+        pixel_res = tuple(np.array(pixel_res_values))
+
+    if pixel_res_units_val:
+        pixel_res_units = pixel_res_units_val
+    else:
+        pixel_res_units = default_pix_res_units
+
+
+    return pixel_res, pixel_res_units
+
+
+def _persist_block(block, target=None, block_info=None):
+    if block_info is not None:
+        return block
+        # block_coords =tuple([slice(c[0],c[1]) for
+        #                      c in block_info[0]['array-location']])
+        # if target is not None:
+        #     target[block_coords] = block
+    return block
+
+
+def _create_multiscale_pyramid(root_path, dataset, fullscale,
+                               downsampling_factors=(2,2,2),
+                               downsampling_method=reducers.windowed_mean,
+                               thumbnail_size_yx=None,
+                               pixel_res=None,
+                               pixel_res_units=None,
+                               axes=('x', 'y', 'z')):
+    """
     Given an n5 with "s0", generate downsampled versions s1, s2, etc., up to the point where
     the smallest version is larger than thumbnail_size_yx (which defaults to the chunk size).
-    '''
-    print('Generating multiscale for', n5_path, data_set)
-    store = zarr.N5Store(n5_path)
+    """
+    fullscale_dataset = (f'/{dataset}/{fullscale}' if fullscale else dataset)
+    print(f'Generating multiscale for {root_path}:{fullscale_dataset}',
+          flush=True)
 
     # Find out what compression is used for s0, so we can use the same for the multiscale
-    fullscale = f'{data_set}/s0' if data_set != '/' else '/s0'
-    r = zarr.open(store=store, mode='r')
-    compressor = r[fullscale].compressor
+    data_container = _open_data_container(root_path, 'a')
 
-    volume = da.from_zarr(store, component=fullscale)
+    fullscale_data = data_container[fullscale_dataset]
+    data_attrs = data_container.attrs.asdict()
+
+    pixel_res, pixel_res_units = _get_pixel_resolution(data_attrs,
+                                                       default_pix_res=pixel_res,
+                                                       default_pix_res_units=pixel_res_units)
+
+    compressor = fullscale_data.compressor
+    print(f'Get full scale dataset from {fullscale_dataset}', flush=True)
+    volume = da.from_zarr(data_container[fullscale_dataset])
     chunk_size = volume.chunksize
     thumbnail_size_yx = thumbnail_size_yx or chunk_size
+
+    print(f'Create pyramid from {volume.shape} down to {thumbnail_size_yx}',
+          flush=True)
     multi = multiscale(volume, downsampling_method, downsampling_factors, chunks=chunk_size)
     
     thumbnail_sized = [np.less_equal(m.shape, thumbnail_size_yx).all() for m in multi]
-    
+
     try:
         cutoff = thumbnail_sized.index(True)
         multi_to_save = multi[0:cutoff + 1]
@@ -71,71 +114,114 @@ def add_multiscale(n5_path, data_set, downsampling_factors=(2,2,2), \
         # All generated versions are larger than thumbnail_size_yx
         multi_to_save = multi
 
+    scales = []
+    res = []
     for idx, m in enumerate(multi_to_save):
-        if idx==0: continue
-        print(f'Saving level {idx} with shape {m.shape}')
-        component = f'{data_set}/s{idx}'
+        factors = tuple([int(math.pow(f,idx)) for f in downsampling_factors])
+        scales.append(factors)
+        if idx == 0:
+             # skip full scale
+            continue
 
-        m.data.to_zarr(store, 
-                       component=component, 
-                       overwrite=True, 
-                       compressor=compressor)
+        component = f'/{dataset}/s{idx}'
 
-        z = zarr.open(store, path=component, mode='a')
-        z.attrs["downsamplingFactors"] = tuple([int(math.pow(f,idx)) for f in downsampling_factors])
+        print(f'Saving level {idx} -> {component} with shape {m.shape}',
+              flush=True)
 
-    print("Added multiscale imagery to", n5_path)
+        z = data_container.require_dataset(
+            component,
+            shape=m.data.shape,
+            dtype=m.data.dtype,
+            pixelResolution=pixel_res,
+            downsamplingFactors=factors,
+        )
+        print('!!!!! Z', z, flush=True)
+        print('!!!!! mdata', m.data, flush=True)
+        # f = da.store(m.data, z, lock=False, compute=False)
+        f = dask.delayed(_persist_block)(volume)
+        res.append(f)
+        break #!!!!!!!
+
+    data_container.attrs.update(scales=scales, axes=axes)
+    print(f'Added multiscale imagery to {root_path}:{dataset}', flush=True)
+
+    return res
 
 
 def main():
     parser = argparse.ArgumentParser(description='Add multiscale levels to an existing n5')
 
-    parser.add_argument('-i', '--input', dest='input_path', type=str, required=True, \
+    parser.add_argument('-i', '--input', dest='input_path',
+                        type=str, required=True,
         help='Path to the directory containing the n5 volume')
 
-    parser.add_argument('-d', '--data_set', dest='data_set', type=str, default="", \
-        help='Path to data set (default empty, so /s0 is assumed to exist at the root)')
+    parser.add_argument('-s0', '--fullscale-path', dest='fullscale',
+                        type=str, default='s0',
+        help='relative path from the dataset to the s0 level')
+    
+    parser.add_argument('-ds', '--data-sets', dest='data_sets',
+                        type=_stringlist, default='',
+        help='relative path(s) to the datasets to multiscale')
 
-    parser.add_argument('-f', '--downsampling_factors', dest='downsampling_factors', type=str, default="2,2,2", \
-        help='Downsampling factors for each dimension (default "2,2,2")')
+    parser.add_argument('-f', '--downsampling-factors', dest='downsampling',
+                        type=str, default='2,2,2',
+        help='Downsampling factors for each dimension')
 
-    parser.add_argument('-p', '--pixel_res', dest='pixel_res', type=str, \
-        help='Pixel resolution for each dimension "2.0,2.0,2.0" (default None) - required for Neuroglancer')
+    parser.add_argument('-p', '--pixel_res', dest='pixel_res',
+                        type=str, default='',
+        help='Pixel resolution for each dimension - if not defined will attempt to get it from s0 attrs')
 
-    parser.add_argument('-u', '--pixel_res_units', dest='pixel_res_units', type=str, default="nm", \
-        help='Measurement unit for --pixel_res (default "nm") - required for Neuroglancer')
+    parser.add_argument('-u', '--pixel_res_units', dest='pixel_res_units',
+                        type=str, default='',
+        help='Measurement unit for --pixel_res if not defined will attempt to get it from s0')
 
+    parser.add_argument('--dask-config', '--dask_config',
+                        dest='dask_config',
+                        type=str, default=None,
+                        help='Dask configuration yaml file')
     parser.add_argument('--dask-scheduler', dest='dask_scheduler', type=str, default=None, \
         help='Run with distributed scheduler')
 
-    parser.add_argument('--metadata-only', dest='metadata_only', action='store_true', \
-        help='Only fix metadata on an existing multiscale pyramid')
     parser.set_defaults(metadata_only=False)
 
     args = parser.parse_args()
 
+    if args.dask_config:
+        import dask.config
+        print(f'Use dask config: {args.dask_config}', flush=True)
+        with open(args.dask_config) as f:
+            dask_config = flatten(yaml.safe_load(f))
+            dask.config.set(dask_config)
+
     if args.dask_scheduler:
-        from dask.distributed import Client
-        client = Client(address=args.dask_scheduler)
+        client = Client(args.dask_scheduler)
     else:
-        client = None
+        client = Client(LocalCluster())
 
-    pbar = ProgressBar()
-    pbar.register()
+    if not args.data_sets:
+        print('No dataset has been specified')
+        return
 
-    downsampling_factors = [int(c) for c in args.downsampling_factors.split(',')]
+    downsampling = [int(c) for c in args.downsampling.split(',')]
 
     pixel_res = None
     if args.pixel_res:
         pixel_res = [float(c) for c in args.pixel_res.split(',')]
 
-    if not args.metadata_only:
-        add_multiscale(args.input_path, args.data_set, downsampling_factors=downsampling_factors)
-
-    add_metadata(args.input_path, downsampling_factors=downsampling_factors, pixel_res=pixel_res, pixel_res_units=args.pixel_res_units)
-
-    if client is not None:
-        client.close()
+    for dataset in args.data_sets:
+        res = _create_multiscale_pyramid(
+            args.input_path, dataset, args.fullscale,
+            downsampling_factors=downsampling,
+            pixel_res=pixel_res,
+            pixel_res_units=args.pixel_res_units,
+        )
+        for r in res:
+            if client is not None:
+                fr = client.compute(r)
+                print('!!!!! FR', fr, flush=True)
+                client.gather(fr)
+            else:
+                r.compute()
 
 
 if __name__ == "__main__":
