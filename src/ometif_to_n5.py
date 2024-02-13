@@ -53,7 +53,6 @@ def _ometif_to_n5_volume(input_path, output_path,
                                           indexed_dims['z'],
                                           indexed_dims['y'],
                                           indexed_dims['x'])
-        print('!!!!!', data_start_param, ' ', data_start)
         data_size = czyx_to_actual_order(list((len(tif_data_shape)-
                                                len(data_size_param))*
                                                (0,)+ # fill with 0
@@ -111,6 +110,7 @@ def _ometif_to_n5_volume(input_path, output_path,
     for c in range(n_channels):
         channel_dataset = output_container.require_dataset(
             f'c{c}/{data_set}',
+            compressor=compressor,
             shape=volume_shape[1:],
             chunks=chunk_size,
             dtype=data_type)
