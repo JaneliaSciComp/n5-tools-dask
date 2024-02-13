@@ -278,7 +278,7 @@ def main():
     # the cropped data start and size is provided in x, y, z, ch order
     # so we need to reverse it to pass it in czyx order
     cropped_data_size = args.cropped_data_size[::-1]
-    cropped_data_start = args.cropped_data_size[::-1]
+    cropped_data_start = args.cropped_data_start[::-1]
     persisted_blocks = _ometif_to_n5_volume(args.input_path,
                                             args.output_path,
                                             args.data_set,
