@@ -60,16 +60,6 @@ def _get_pixel_resolution(attrs, default_pix_res=None, default_pix_res_units='um
     return pixel_res, pixel_res_units
 
 
-def _persist_block(block, target=None, block_info=None):
-    if block_info is not None:
-        return block
-        # block_coords =tuple([slice(c[0],c[1]) for
-        #                      c in block_info[0]['array-location']])
-        # if target is not None:
-        #     target[block_coords] = block
-    return block
-
-
 def _create_multiscale_pyramid(root_path, dataset, fullscale,
                                downsampling_factors=(2,2,2),
                                downsampling_method=reducers.windowed_mean,
@@ -130,17 +120,15 @@ def _create_multiscale_pyramid(root_path, dataset, fullscale,
 
         z = data_container.require_dataset(
             component,
+            compressor=compressor,
             shape=m.data.shape,
             dtype=m.data.dtype,
             pixelResolution=pixel_res,
             downsamplingFactors=factors,
         )
-        print('!!!!! Z', z, flush=True)
-        print('!!!!! mdata', m.data, flush=True)
-        # f = da.store(m.data, z, lock=False, compute=False)
-        f = dask.delayed(_persist_block)(volume)
+        print(f'Storing {z}', flush=True)
+        f = da.store(m.data, z, lock=False, compute=False)
         res.append(f)
-        break #!!!!!!!
 
     data_container.attrs.update(scales=scales, axes=axes)
     print(f'Added multiscale imagery to {root_path}:{dataset}', flush=True)
@@ -218,8 +206,7 @@ def main():
         for r in res:
             if client is not None:
                 fr = client.compute(r)
-                print('!!!!! FR', fr, flush=True)
-                client.gather(fr)
+                r = client.gather(fr)
             else:
                 r.compute()
 
